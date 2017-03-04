@@ -58,10 +58,14 @@ object SbtByteBuddy {
 
     // Parent loader as this ClassLoader
     implicit val classLoader = new java.net.URLClassLoader(classpath, this.getClass.getClassLoader)
+
+    // Configure log
+    val logHandler = ByteBuddyLogHandler(logger)
     try {
       processOutputDirectory(classes, suffix, packages, classpath.map(_.getFile), initialization, plugins)
     } finally {
       classLoader.close
+      logHandler.reset
     }
 
     val allProducts = analysis.relations.allProducts
