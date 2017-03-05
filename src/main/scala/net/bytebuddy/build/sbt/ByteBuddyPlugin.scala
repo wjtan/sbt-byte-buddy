@@ -12,6 +12,7 @@ object ByteBuddyPlugin extends AutoPlugin {
   override def requires: Plugins = plugins.JvmPlugin
 
   object autoImport {
+    val byteBuddyEnabled = settingKey[Boolean]("Whether the Byte Buddy enhancer is enabled or not")
     val byteBuddySuffix = SettingKey[String]("The method name suffix that is used when type's method need to be rebased.")
     val byteBuddyInitialization = SettingKey[String]("The initializer used for creating a ByteBuddy instance and for applying a transformation.")
     val byteBuddyPackages = taskKey[Seq[String]]("The packages that should be searched for ByteBuddy to transform.")
@@ -23,6 +24,7 @@ object ByteBuddyPlugin extends AutoPlugin {
   def scopedSettings = Seq(manipulateBytecode := SbtByteBuddy.byteBuddyTransform.value)
 
   lazy val defaultSettings: Seq[Setting[_]] = Seq(
+    byteBuddyEnabled := true,
     byteBuddySuffix := "",
     byteBuddyInitialization := net.bytebuddy.build.EntryPoint.Default.REBASE.name(),
     byteBuddyPackages := Seq())
@@ -46,68 +48,66 @@ object SbtByteBuddy {
   def byteBuddyTransform: Def.Initialize[Task[Compiler.CompileResult]] = Def.task {
     implicit val logger: Logger = streams.value.log
 
-    val deps = dependencyClasspath.value
-    val classes = classDirectory.value
-
-    val initialization = byteBuddyInitialization.value
-    val suffix = byteBuddySuffix.value
-    val plugins = byteBuddyPlugins.value
-    val packages = byteBuddyPackages.value
-
-    val classpath = deps.map(_.data.toURI.toURL).toArray :+ classes.toURI.toURL
-
-    // Parent loader as this ClassLoader
-    implicit val classLoader = new java.net.URLClassLoader(classpath, this.getClass.getClassLoader)
-
-    // Configure log
-    val logHandler = ByteBuddyLogHandler(logger)
-    val processedFiles =
-      try {
-        processOutputDirectory(classes, suffix, packages, classpath.map(_.getFile), initialization, plugins)
-      } finally {
-        classLoader.close
-        logHandler.reset
-      }
-
-    val result = manipulateBytecode.value
-    if (processedFiles.isEmpty) {
-      logger.info("No transformed files")
-      result
+    val enabled = byteBuddyEnabled.value
+    if (!enabled) {
+      logger.info("ByteBuddy Disabled")
+      manipulateBytecode.value
     } else {
-      val analysis = result.analysis
-      val processedFileSet = processedFiles.toSet
-      processedFileSet.foreach(logger.info(_))
+      val deps = dependencyClasspath.value
+      val classes = classDirectory.value
 
-      val allProducts = analysis.relations.allProducts
+      val initialization = byteBuddyInitialization.value
+      val suffix = byteBuddySuffix.value
+      val plugins = byteBuddyPlugins.value
+      val packages = byteBuddyPackages.value
 
-      /**
-       * Updates stamp of product (class file) by preserving the type of a passed stamp.
-       * This way any stamp incremental compiler chooses to use to mark class files will
-       * be supported.
-       */
-      def updateStampForClassFile(classFile: File, stamp: Stamp): Stamp = stamp match {
-        case _: Exists => Stamp.exists(classFile)
-        case _: LastModified => Stamp.lastModified(classFile)
-        case _: Hash => Stamp.hash(classFile)
-      }
-      // Since we may have modified some of the products of the incremental compiler, that is, the compiled template
-      // classes and compiled Java sources, we need to update their timestamps in the incremental compiler, otherwise
-      // the incremental compiler will see that they've changed since it last compiled them, and recompile them.
-      val updatedAnalysis = analysis.copy(stamps = allProducts.foldLeft(analysis.stamps) { (stamps, classFile) =>
-        if (processedFileSet.contains(classFile.getAbsolutePath)) {
-          logger.debug(s"Update timestamp for $classFile")
+      val classpath = deps.map(_.data.toURI.toURL).toArray :+ classes.toURI.toURL
+
+      // Parent loader as this ClassLoader
+      implicit val classLoader = new java.net.URLClassLoader(classpath, this.getClass.getClassLoader)
+
+      // Configure log
+      val logHandler = ByteBuddyLogHandler(logger)
+      val processedFiles =
+        try {
+          processOutputDirectory(classes, suffix, packages, classpath.map(_.getFile), initialization, plugins)
+        } finally {
+          classLoader.close
+          logHandler.reset
+        }
+
+      val result = manipulateBytecode.value
+      if (processedFiles.isEmpty) {
+        logger.info("No transformed files")
+        result
+      } else {
+        val analysis = result.analysis
+        val allProducts = analysis.relations.allProducts
+
+        /**
+         * Updates stamp of product (class file) by preserving the type of a passed stamp.
+         * This way any stamp incremental compiler chooses to use to mark class files will
+         * be supported.
+         */
+        def updateStampForClassFile(classFile: File, stamp: Stamp): Stamp = stamp match {
+          case _: Exists => Stamp.exists(classFile)
+          case _: LastModified => Stamp.lastModified(classFile)
+          case _: Hash => Stamp.hash(classFile)
+        }
+        // Since we may have modified some of the products of the incremental compiler, that is, the compiled template
+        // classes and compiled Java sources, we need to update their timestamps in the incremental compiler, otherwise
+        // the incremental compiler will see that they've changed since it last compiled them, and recompile them.
+        val updatedAnalysis = analysis.copy(stamps = allProducts.foldLeft(analysis.stamps) { (stamps, classFile) =>
           val existingStamp = stamps.product(classFile)
           if (existingStamp == Stamp.notPresent) {
             throw new java.io.IOException("Tried to update a stamp for class file that is not recorded as "
               + s"product of incremental compiler: $classFile")
           }
           stamps.markProduct(classFile, updateStampForClassFile(classFile, existingStamp))
-        } else {
-          stamps
-        }
-      })
+        })
 
-      result.copy(analysis = updatedAnalysis)
+        result.copy(analysis = updatedAnalysis)
+      }
     }
   }
 
