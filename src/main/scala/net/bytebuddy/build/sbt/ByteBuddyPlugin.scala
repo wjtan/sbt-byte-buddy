@@ -4,9 +4,11 @@ import sbt._
 import sbt.Keys._
 import sbt.inc._
 
-object SbtByteBuddyPlugin extends AutoPlugin {
-  override def trigger: PluginTrigger = allRequirements
+object ByteBuddyPlugin extends AutoPlugin {
+  /** Plugin must be enabled on the project. See http://www.scala-sbt.org/0.13/tutorial/Using-Plugins.html */
+  override def trigger: PluginTrigger = noTrigger
 
+  /** All we need is Java. */
   override def requires: Plugins = plugins.JvmPlugin
 
   object autoImport {
@@ -29,7 +31,7 @@ object SbtByteBuddyPlugin extends AutoPlugin {
 }
 
 object SbtByteBuddy {
-  import SbtByteBuddyPlugin.autoImport._
+  import ByteBuddyPlugin.autoImport._
 
   import net.bytebuddy._
   import net.bytebuddy.build._
@@ -46,8 +48,6 @@ object SbtByteBuddy {
 
     val deps = dependencyClasspath.value
     val classes = classDirectory.value
-    val result = manipulateBytecode.value
-    val analysis = result.analysis
 
     val initialization = byteBuddyInitialization.value
     val suffix = byteBuddySuffix.value
@@ -61,38 +61,54 @@ object SbtByteBuddy {
 
     // Configure log
     val logHandler = ByteBuddyLogHandler(logger)
-    try {
-      processOutputDirectory(classes, suffix, packages, classpath.map(_.getFile), initialization, plugins)
-    } finally {
-      classLoader.close
-      logHandler.reset
-    }
-
-    val allProducts = analysis.relations.allProducts
-
-    /**
-     * Updates stamp of product (class file) by preserving the type of a passed stamp.
-     * This way any stamp incremental compiler chooses to use to mark class files will
-     * be supported.
-     */
-    def updateStampForClassFile(classFile: File, stamp: Stamp): Stamp = stamp match {
-      case _: Exists => Stamp.exists(classFile)
-      case _: LastModified => Stamp.lastModified(classFile)
-      case _: Hash => Stamp.hash(classFile)
-    }
-    // Since we may have modified some of the products of the incremental compiler, that is, the compiled template
-    // classes and compiled Java sources, we need to update their timestamps in the incremental compiler, otherwise
-    // the incremental compiler will see that they've changed since it last compiled them, and recompile them.
-    val updatedAnalysis = analysis.copy(stamps = allProducts.foldLeft(analysis.stamps) { (stamps, classFile) =>
-      val existingStamp = stamps.product(classFile)
-      if (existingStamp == Stamp.notPresent) {
-        throw new java.io.IOException("Tried to update a stamp for class file that is not recorded as "
-          + s"product of incremental compiler: $classFile")
+    val processedFiles =
+      try {
+        processOutputDirectory(classes, suffix, packages, classpath.map(_.getFile), initialization, plugins)
+      } finally {
+        classLoader.close
+        logHandler.reset
       }
-      stamps.markProduct(classFile, updateStampForClassFile(classFile, existingStamp))
-    })
 
-    result.copy(analysis = updatedAnalysis)
+    val result = manipulateBytecode.value
+    if (processedFiles.isEmpty) {
+      logger.info("No transformed files")
+      result
+    } else {
+      val analysis = result.analysis
+      val processedFileSet = processedFiles.toSet
+      processedFileSet.foreach(logger.info(_))
+
+      val allProducts = analysis.relations.allProducts
+
+      /**
+       * Updates stamp of product (class file) by preserving the type of a passed stamp.
+       * This way any stamp incremental compiler chooses to use to mark class files will
+       * be supported.
+       */
+      def updateStampForClassFile(classFile: File, stamp: Stamp): Stamp = stamp match {
+        case _: Exists => Stamp.exists(classFile)
+        case _: LastModified => Stamp.lastModified(classFile)
+        case _: Hash => Stamp.hash(classFile)
+      }
+      // Since we may have modified some of the products of the incremental compiler, that is, the compiled template
+      // classes and compiled Java sources, we need to update their timestamps in the incremental compiler, otherwise
+      // the incremental compiler will see that they've changed since it last compiled them, and recompile them.
+      val updatedAnalysis = analysis.copy(stamps = allProducts.foldLeft(analysis.stamps) { (stamps, classFile) =>
+        if (processedFileSet.contains(classFile.getAbsolutePath)) {
+          logger.debug(s"Update timestamp for $classFile")
+          val existingStamp = stamps.product(classFile)
+          if (existingStamp == Stamp.notPresent) {
+            throw new java.io.IOException("Tried to update a stamp for class file that is not recorded as "
+              + s"product of incremental compiler: $classFile")
+          }
+          stamps.markProduct(classFile, updateStampForClassFile(classFile, existingStamp))
+        } else {
+          stamps
+        }
+      })
+
+      result.copy(analysis = updatedAnalysis)
+    }
   }
 
   def processOutputDirectory(root: File,
@@ -100,7 +116,7 @@ object SbtByteBuddy {
     filters: Seq[String],
     classPath: Array[String],
     initialization: String,
-    pluginNames: Seq[String])(implicit classLoader: java.lang.ClassLoader, logger: Logger) {
+    pluginNames: Seq[String])(implicit classLoader: java.lang.ClassLoader, logger: Logger): Seq[String] = {
 
     if (!root.isDirectory()) {
       throw new java.io.IOException("Target location does not exist or is no directory: " + root)
@@ -108,19 +124,20 @@ object SbtByteBuddy {
 
     val plugins = pluginNames.map(pluginName => {
       try {
-        classLoader.loadClass(pluginName).newInstance().asInstanceOf[net.bytebuddy.build.Plugin]
+        val loadedPlugin = classLoader.loadClass(pluginName).newInstance().asInstanceOf[net.bytebuddy.build.Plugin]
+
+        logger.info(s"Resolved transformation plugin: $pluginName")
+        loadedPlugin
       } catch {
         case ex: Exception => throw new IllegalStateException(s"Cannot create plugin: $pluginName", ex)
       }
     })
 
     val entryPoint = getEntryPoint(initialization)
-
-    logger.info(s"Resolved entry point: $entryPoint")
     transform(root, suffix, filters, entryPoint, classPath, plugins)
   }
 
-  def getEntryPoint(entryPoint: String)(implicit classLoader: java.lang.ClassLoader): EntryPoint = {
+  def getEntryPoint(entryPoint: String)(implicit classLoader: java.lang.ClassLoader, logger: Logger): EntryPoint = {
     if (entryPoint == null || entryPoint.isEmpty()) {
       throw new java.io.IOException("Entry point name is not defined")
     }
@@ -130,19 +147,25 @@ object SbtByteBuddy {
       }
     }
     try {
-      classLoader.loadClass(entryPoint).asInstanceOf[EntryPoint]
+      val loadedEntryPoint = classLoader.loadClass(entryPoint).asInstanceOf[EntryPoint]
+
+      logger.info(s"Resolved entry point: $entryPoint")
+      loadedEntryPoint
     } catch {
       case exception: Exception => throw new IllegalStateException(s"Cannot create entry point: $entryPoint", exception)
     }
   }
 
+  /*
+   * Return Filenames that is modified
+   */
   def transform(
     root: File,
     suffix: String,
     filters: Seq[String],
     entryPoint: EntryPoint,
     classPath: Array[String],
-    plugins: Seq[Plugin])(implicit logger: Logger) {
+    plugins: Seq[Plugin])(implicit logger: Logger): Seq[String] = {
     val classFileLocators = scala.collection.mutable.ListBuffer.empty[ClassFileLocator]
     classFileLocators += new ClassFileLocator.ForFolder(root)
     for (target <- classPath) {
@@ -162,7 +185,7 @@ object SbtByteBuddy {
         TypePool.Default.ReaderMode.FAST,
         TypePool.ClassLoading.ofBootPath())
 
-      logger.info(s"Processing class files located in in: $root")
+      logger.debug(s"Processing class files located in in: $root")
       val byteBuddy =
         try {
           entryPoint.getByteBuddy()
@@ -183,61 +206,34 @@ object SbtByteBuddy {
         } else {
           filters.map(pack => {
             val path = pack.replace('.', '/')
-            if (path.endsWith("*")) {
-              // Search by wild card
-              ((root / path.substring(0, path.length - 1)) ** "*")
-            } else {
-              PathFinder(root / path)
-            }
+
+            val pathFinder =
+              if (path.endsWith("*")) {
+                // Search by wild card
+                ((root / path.substring(0, path.length - 1)) ** "*")
+              } else {
+                PathFinder(root / path)
+              }
+
+            pathFinder.filter { file => file.isFile() && file.getName().endsWith(CLASS_FILE_EXTENSION) }
           }).reduce((p1, p2) => p1 +++ p2)
         }
 
-      for (file <- pathFinder.get) {
-        processDirectory(root,
-          file,
+      pathFinder.get.map(file => {
+        logger.debug("File: " + file)
+
+        processClassFile(root,
+          root.toURI().relativize(file.toURI()).toString(),
           byteBuddy,
           entryPoint,
           methodNameTransformer,
           classFileLocator,
           typePool,
           plugins)
-      }
+      }).flatten
     } finally {
       classFileLocator.close()
     }
-  }
-
-  def processDirectory(root: File,
-    file: File,
-    byteBuddy: ByteBuddy,
-    entryPoint: EntryPoint,
-    methodNameTransformer: MethodNameTransformer,
-    classFileLocator: ClassFileLocator,
-    typePool: TypePool,
-    plugins: Seq[Plugin])(implicit logger: Logger) {
-
-    logger.info("File: " + file)
-
-    if (file.isDirectory()) {
-      val files = file.listFiles
-      if (files != null) {
-        for (aFile <- files) {
-          processDirectory(root, aFile, byteBuddy, entryPoint, methodNameTransformer, classFileLocator, typePool, plugins)
-        }
-      }
-    } else if (file.isFile() && file.getName().endsWith(CLASS_FILE_EXTENSION)) {
-      processClassFile(root,
-        root.toURI().relativize(file.toURI()).toString(),
-        byteBuddy,
-        entryPoint,
-        methodNameTransformer,
-        classFileLocator,
-        typePool,
-        plugins)
-    } else {
-      logger.debug(s"Skipping ignored file: $file")
-    }
-
   }
 
   def processClassFile(root: File,
@@ -247,10 +243,10 @@ object SbtByteBuddy {
     methodNameTransformer: MethodNameTransformer,
     classFileLocator: ClassFileLocator,
     typePool: TypePool,
-    plugins: Seq[Plugin])(implicit logger: Logger) {
+    plugins: Seq[Plugin])(implicit logger: Logger): Option[String] = {
 
     val typeName = file.replace('/', '.').substring(0, file.length() - CLASS_FILE_EXTENSION.length)
-    logger.debug(s"Processing class file: $typeName")
+    logger.verbose(s"Processing class file: $typeName")
     val typeDescription = typePool.describe(typeName).resolve()
 
     var builder: DynamicType.Builder[_] = null
@@ -283,11 +279,15 @@ object SbtByteBuddy {
       }
       try {
         dynamicType.saveIn(root)
+
+        Some(file)
       } catch {
         case exception: java.io.IOException => throw new IllegalStateException(s"Cannot save $typeName in $root", exception)
       }
     } else {
       logger.debug(s"Skipping non-transformed type: $typeName")
+
+      None
     }
   }
 

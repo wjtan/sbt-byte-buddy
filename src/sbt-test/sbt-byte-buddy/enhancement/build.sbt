@@ -1,3 +1,5 @@
+name := "enhantment-test"
+
 scalaVersion := "2.12.1"
 
 resolvers ++= DefaultOptions.resolvers(snapshot = true)
