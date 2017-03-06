@@ -78,7 +78,7 @@ object SbtByteBuddy {
 
       val result = manipulateBytecode.value
       if (processedFiles.isEmpty) {
-        logger.info("No transformed files")
+        logger.verbose("No transformed files")
         result
       } else {
         val analysis = result.analysis
@@ -126,7 +126,7 @@ object SbtByteBuddy {
       try {
         val loadedPlugin = classLoader.loadClass(pluginName).newInstance().asInstanceOf[net.bytebuddy.build.Plugin]
 
-        logger.info(s"Resolved transformation plugin: $pluginName")
+        logger.verbose(s"Resolved transformation plugin: $pluginName")
         loadedPlugin
       } catch {
         case ex: Exception => throw new IllegalStateException(s"Cannot create plugin: $pluginName", ex)
@@ -149,7 +149,7 @@ object SbtByteBuddy {
     try {
       val loadedEntryPoint = classLoader.loadClass(entryPoint).asInstanceOf[EntryPoint]
 
-      logger.info(s"Resolved entry point: $entryPoint")
+      logger.verbose(s"Resolved entry point: $entryPoint")
       loadedEntryPoint
     } catch {
       case exception: Exception => throw new IllegalStateException(s"Cannot create entry point: $entryPoint", exception)
