@@ -5,7 +5,7 @@ This is an [sbt](http://scala-sbt.org/) plugin for compile-time code generation 
 
 Install the plugin by adding the following to `project/plugins.sbt`:
 
-    addSbtPlugin("net.bytebuddy" % "sbt-byte-buddy" % "1.0.0-SNAPSHOT")
+    addSbtPlugin("net.bytebuddy" % "sbt-byte-buddy" % "1.0.0")
 
 And then modify your `build.sbt` to enable the SbtByteBuddy plugin:
 
@@ -51,7 +51,7 @@ Based on this [StackOverflow answer](http://stackoverflow.com/questions/21515325
 In `build.sbt`:
 
 ```
-// a 'compileonly' configuation
+// a 'compile-only' configuation
 ivyConfigurations += config("compile-only").hide
 
 // some compileonly dependency
