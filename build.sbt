@@ -10,10 +10,8 @@ sbtPlugin := true
 
 libraryDependencies += "net.bytebuddy" % "byte-buddy" % "1.6.9"
 
-bintrayRepository := "maven"
+bintrayRepository := "sbt-plugins"
 
 bintrayPackage := "sbt-byte-buddy"
 
-publishMavenStyle := true
-
-licenses +=("Apache-2.0", url("http://opensource.org/licenses/apache2.0.php"))
+licenses +=("Apache-2.0", url("http://www.apache.org/licenses/LICENSE-2.0.html"))

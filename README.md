@@ -1,4 +1,4 @@
-[ ![Download](https://api.bintray.com/packages/wjtan/maven/sbt-byte-buddy/images/download.svg?version=1.0.0) ](https://bintray.com/wjtan/maven/sbt-byte-buddy/1.0.0/link)
+[ ![Download](https://api.bintray.com/packages/wjtan/sbt-plugins/sbt-byte-buddy/images/download.svg) ](https://bintray.com/wjtan/sbt-plugins/sbt-byte-buddy/_latestVersion)
 
 # sbt-byte-buddy - compile-time code generation via ByteBuddy in sbt
 
