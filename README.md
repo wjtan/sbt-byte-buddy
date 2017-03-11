@@ -1,3 +1,5 @@
+[ ![Download](https://api.bintray.com/packages/wjtan/maven/sbt-byte-buddy/images/download.svg?version=1.0.0) ](https://bintray.com/wjtan/maven/sbt-byte-buddy/1.0.0/link)
+
 # sbt-byte-buddy - compile-time code generation via ByteBuddy in sbt
 
 This is an [sbt](http://scala-sbt.org/) plugin for compile-time code generation via [ByteBuddy](http://bytebuddy.net/), based on the [ByteBuddy maven plugin](https://github.com/raphw/byte-buddy/tree/master/byte-buddy-maven-plugin).
