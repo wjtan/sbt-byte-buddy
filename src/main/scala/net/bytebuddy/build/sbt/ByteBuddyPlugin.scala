@@ -4,6 +4,9 @@ import sbt._
 import sbt.Keys._
 import sbt.inc._
 
+import xsbti.compile.CompileResult
+import xsbti.compile.analysis.Stamp
+
 object ByteBuddyPlugin extends AutoPlugin {
   /** Plugin must be enabled on the project. See http://www.scala-sbt.org/0.13/tutorial/Using-Plugins.html */
   override def trigger: PluginTrigger = noTrigger
@@ -13,15 +16,21 @@ object ByteBuddyPlugin extends AutoPlugin {
 
   object autoImport {
     val byteBuddyEnabled = settingKey[Boolean]("Whether the Byte Buddy enhancer is enabled or not")
-    val byteBuddySuffix = SettingKey[String]("The method name suffix that is used when type's method need to be rebased.")
-    val byteBuddyInitialization = SettingKey[String]("The initializer used for creating a ByteBuddy instance and for applying a transformation.")
+    val byteBuddySuffix = settingKey[String]("The method name suffix that is used when type's method need to be rebased.")
+    val byteBuddyInitialization = settingKey[String]("The initializer used for creating a ByteBuddy instance and for applying a transformation.")
     val byteBuddyPackages = taskKey[Seq[String]]("The packages that should be searched for ByteBuddy to transform.")
-    val byteBuddyPlugins = SettingKey[Seq[String]]("Transformation specifications to apply during the plugin\'s execution.")
+    val byteBuddyPlugins = settingKey[Seq[String]]("Transformation specifications to apply during the plugin\'s execution.")
   }
 
   import autoImport._
 
-  def scopedSettings = Seq(manipulateBytecode := SbtByteBuddy.byteBuddyTransform.value)
+  def scopedSettings: Seq[Setting[_]] = Seq(manipulateBytecode :=
+    (Def.taskDyn {
+      SbtByteBuddy.byteBuddyTransform(
+        manipulateBytecode.value,
+        dependencyClasspath.value,
+        byteBuddyPackages.value)
+    }).value)
 
   lazy val defaultSettings: Seq[Setting[_]] = Seq(
     byteBuddyEnabled := true,
@@ -33,6 +42,11 @@ object ByteBuddyPlugin extends AutoPlugin {
 }
 
 object SbtByteBuddy {
+  import sbt.internal.inc.Hash
+  import sbt.internal.inc.LastModified
+  import sbt.internal.inc.Analysis
+  import sbt.internal.inc.Stamper
+
   import ByteBuddyPlugin.autoImport._
 
   import net.bytebuddy._
@@ -45,21 +59,24 @@ object SbtByteBuddy {
 
   val CLASS_FILE_EXTENSION = ".class"
 
-  def byteBuddyTransform: Def.Initialize[Task[Compiler.CompileResult]] = Def.task {
+  // This is replacement of old Stamp `Exists` representation
+  private final val notPresent = "absent"
+
+  def byteBuddyTransform(result: CompileResult, deps: Seq[Attributed[File]], packages: Seq[String]): Def.Initialize[Task[CompileResult]] = Def.task {
     implicit val logger: Logger = streams.value.log
 
     val enabled = byteBuddyEnabled.value
     if (!enabled) {
       logger.info("ByteBuddy Disabled")
-      manipulateBytecode.value
+      result
     } else {
-      val deps = dependencyClasspath.value
+      // val deps = dependencyClasspath.value
       val classes = classDirectory.value
 
       val initialization = byteBuddyInitialization.value
       val suffix = byteBuddySuffix.value
       val plugins = byteBuddyPlugins.value
-      val packages = byteBuddyPackages.value
+      //val packages = byteBuddyPackages.value
 
       val classpath = deps.map(_.data.toURI.toURL).toArray :+ classes.toURI.toURL
 
@@ -76,12 +93,11 @@ object SbtByteBuddy {
           logHandler.reset
         }
 
-      val result = manipulateBytecode.value
       if (processedFiles.isEmpty) {
         logger.verbose("No transformed files")
         result
       } else {
-        val analysis = result.analysis
+        val analysis = result.analysis.asInstanceOf[Analysis]
         val allProducts = analysis.relations.allProducts
 
         /**
@@ -90,33 +106,35 @@ object SbtByteBuddy {
          * be supported.
          */
         def updateStampForClassFile(classFile: File, stamp: Stamp): Stamp = stamp match {
-          case _: Exists => Stamp.exists(classFile)
-          case _: LastModified => Stamp.lastModified(classFile)
-          case _: Hash => Stamp.hash(classFile)
+          //case _: Exists => sbt.internal.inc.Stamp.exists(classFile)
+          case _: LastModified => Stamper.forLastModified(classFile)
+          case _: Hash => Stamper.forHash(classFile)
         }
         // Since we may have modified some of the products of the incremental compiler, that is, the compiled template
         // classes and compiled Java sources, we need to update their timestamps in the incremental compiler, otherwise
         // the incremental compiler will see that they've changed since it last compiled them, and recompile them.
-        val updatedAnalysis = analysis.copy(stamps = allProducts.foldLeft(analysis.stamps) { (stamps, classFile) =>
-          val existingStamp = stamps.product(classFile)
-          if (existingStamp == Stamp.notPresent) {
-            throw new java.io.IOException("Tried to update a stamp for class file that is not recorded as "
-              + s"product of incremental compiler: $classFile")
-          }
-          stamps.markProduct(classFile, updateStampForClassFile(classFile, existingStamp))
+        val updatedAnalysis = analysis.copy(stamps = processedFiles.foldLeft(analysis.stamps) {
+          (stamps, classFile) =>
+            val existingStamp = stamps.product(classFile)
+            if (existingStamp.writeStamp == notPresent) {
+              throw new java.io.IOException("Tried to update a stamp for class file that is not recorded as "
+                + s"product of incremental compiler: $classFile")
+            }
+            stamps.markProduct(classFile, updateStampForClassFile(classFile, existingStamp))
         })
 
-        result.copy(analysis = updatedAnalysis)
+        result.withAnalysis(updatedAnalysis).withHasModified(true)
       }
     }
   }
 
-  def processOutputDirectory(root: File,
+  def processOutputDirectory(
+    root: File,
     suffix: String,
     filters: Seq[String],
     classPath: Array[String],
     initialization: String,
-    pluginNames: Seq[String])(implicit classLoader: java.lang.ClassLoader, logger: Logger): Seq[String] = {
+    pluginNames: Seq[String])(implicit classLoader: java.lang.ClassLoader, logger: Logger): Seq[File] = {
 
     if (!root.isDirectory()) {
       throw new java.io.IOException("Target location does not exist or is no directory: " + root)
@@ -134,7 +152,17 @@ object SbtByteBuddy {
     })
 
     val entryPoint = getEntryPoint(initialization)
-    transform(root, suffix, filters, entryPoint, classPath, plugins)
+    val transformedFiles = transform(root, suffix, filters, entryPoint, classPath, plugins)
+    
+    plugins.foreach(plugin => {
+      try {
+        plugin.close()
+      } catch {
+        case ex: java.io.IOException => throw new IllegalStateException(s"Cannot close plugin: " + plugin.getClass.getName(), ex)
+      }
+    })
+    
+    transformedFiles
   }
 
   def getEntryPoint(entryPoint: String)(implicit classLoader: java.lang.ClassLoader, logger: Logger): EntryPoint = {
@@ -165,7 +193,7 @@ object SbtByteBuddy {
     filters: Seq[String],
     entryPoint: EntryPoint,
     classPath: Array[String],
-    plugins: Seq[Plugin])(implicit logger: Logger): Seq[String] = {
+    plugins: Seq[Plugin])(implicit logger: Logger): Seq[File] = {
     val classFileLocators = scala.collection.mutable.ListBuffer.empty[ClassFileLocator]
     classFileLocators += new ClassFileLocator.ForFolder(root)
     for (target <- classPath) {
@@ -178,17 +206,20 @@ object SbtByteBuddy {
     }
 
     import scala.collection.JavaConverters._
+    import net.bytebuddy.ClassFileVersion
+
     val classFileLocator = new ClassFileLocator.Compound(classFileLocators.asJava)
     try {
-      val typePool = new TypePool.Default.WithLazyResolution(new TypePool.CacheProvider.Simple(),
+      val typePool = new TypePool.Default.WithLazyResolution(
+        new TypePool.CacheProvider.Simple(),
         classFileLocator,
         TypePool.Default.ReaderMode.FAST,
-        TypePool.ClassLoading.ofBootPath())
+        TypePool.ClassLoading.ofBootLoader())
 
       logger.debug(s"Processing class files located in in: $root")
       val byteBuddy =
         try {
-          entryPoint.getByteBuddy()
+          entryPoint.byteBuddy(ClassFileVersion.ofThisVm())
         } catch {
           case throwable: Throwable => throw new java.io.IOException("Cannot create Byte Buddy instance", throwable)
         }
@@ -222,28 +253,34 @@ object SbtByteBuddy {
       pathFinder.get.map(file => {
         logger.debug("File: " + file)
 
-        processClassFile(root,
+        if (processClassFile(
+          root,
           root.toURI().relativize(file.toURI()).toString(),
           byteBuddy,
           entryPoint,
           methodNameTransformer,
           classFileLocator,
           typePool,
-          plugins)
+          plugins)) {
+          Option(file)
+        } else {
+          None
+        }
       }).flatten
     } finally {
       classFileLocator.close()
     }
   }
 
-  def processClassFile(root: File,
+  def processClassFile(
+    root: File,
     file: String,
     byteBuddy: ByteBuddy,
     entryPoint: EntryPoint,
     methodNameTransformer: MethodNameTransformer,
     classFileLocator: ClassFileLocator,
     typePool: TypePool,
-    plugins: Seq[Plugin])(implicit logger: Logger): Option[String] = {
+    plugins: Seq[Plugin])(implicit logger: Logger): Boolean = {
 
     val typeName = file.replace('/', '.').substring(0, file.length() - CLASS_FILE_EXTENSION.length)
     logger.verbose(s"Processing class file: $typeName")
@@ -260,7 +297,7 @@ object SbtByteBuddy {
     for (plugin <- plugins) {
       try {
         if (plugin.matches(typeDescription)) {
-          builder = plugin.apply(builder, typeDescription)
+          builder = plugin.apply(builder, typeDescription, classFileLocator)
           transformed = true
         }
       } catch {
@@ -280,14 +317,14 @@ object SbtByteBuddy {
       try {
         dynamicType.saveIn(root)
 
-        Some(file)
+        true
       } catch {
         case exception: java.io.IOException => throw new IllegalStateException(s"Cannot save $typeName in $root", exception)
       }
     } else {
       logger.debug(s"Skipping non-transformed type: $typeName")
 
-      None
+      false
     }
   }
 
