@@ -7,7 +7,7 @@ This is an [sbt](http://scala-sbt.org/) plugin for compile-time code generation 
 
 Install the plugin by adding the following to `project/plugins.sbt`:
 
-    addSbtPlugin("net.bytebuddy" % "sbt-byte-buddy" % "1.0.0")
+    addSbtPlugin("net.bytebuddy" % "sbt-byte-buddy" % "1.2.0")
 
 And then modify your `build.sbt` to enable the SbtByteBuddy plugin:
 
